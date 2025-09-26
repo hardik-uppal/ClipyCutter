@@ -1,0 +1,151 @@
+version: '3.8'
+
+services:
+  # vLLM Whisper Server (ASR)
+  vllm-whisper:
+    image: vllm/vllm-openai:latest
+    container_name: clipycutter-whisper
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    command: >
+      --model openai/whisper-large-v3
+      --port 8000
+      --host 0.0.0.0
+      --served-model-name openai/whisper-large-v3
+      --max-model-len 4096
+      --gpu-memory-utilization 0.4
+      --enable-chunked-prefill
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # vLLM Chat Server (LLM for cogency grading)
+  vllm-chat:
+    image: vllm/vllm-openai:latest
+    container_name: clipycutter-chat
+    ports:
+      - "8001:8001"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    command: >
+      --model meta-llama/Llama-3.1-8B-Instruct
+      --port 8001
+      --host 0.0.0.0
+      --served-model-name meta-llama/Llama-3.1-8B-Instruct
+      --max-model-len 8192
+      --gpu-memory-utilization 0.5
+      --enable-chunked-prefill
+      --chat-template llama3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      vllm-whisper:
+        condition: service_healthy
+
+  # Optional: vLLM Reranker Server
+  vllm-reranker:
+    image: vllm/vllm-openai:latest
+    container_name: clipycutter-reranker
+    ports:
+      - "8002:8002"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    command: >
+      --model BAAI/bge-reranker-large
+      --port 8002
+      --host 0.0.0.0
+      --served-model-name BAAI/bge-reranker-large
+      --max-model-len 512
+      --gpu-memory-utilization 0.1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    profiles:
+      - reranker  # Optional service, enable with --profile reranker
+
+  # ClipyCutter Processing Service
+  clipycutter:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.clipycutter
+    container_name: clipycutter-processor
+    volumes:
+      - ./temp_downloads:/app/temp_downloads
+      - ./rendered_clips:/app/rendered_clips
+      - ./logs:/app/logs
+    environment:
+      - WHISPER_SERVER_URL=http://vllm-whisper:8000
+      - CHAT_SERVER_URL=http://vllm-chat:8001
+      - RERANKER_SERVER_URL=http://vllm-reranker:8002
+      - CUDA_VISIBLE_DEVICES=0
+    depends_on:
+      vllm-whisper:
+        condition: service_healthy
+      vllm-chat:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    profiles:
+      - processor  # Optional service for background processing
+
+networks:
+  default:
+    name: clipycutter-network
+
+volumes:
+  huggingface_cache:
+    driver: local
+  temp_downloads:
+    driver: local
+  rendered_clips:
+    driver: local
+  logs:
+    driver: local
